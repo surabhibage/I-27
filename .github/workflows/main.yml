@@ -1,0 +1,16 @@
+name: Off-Season Job Sync
+on:
+  schedule:
+    # Runs at off-peak minutes (21 and 51 past the hour) to avoid server delays
+    - cron: '21,51 * * * *' 
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync with Upstream
+        run: |
+          gh repo sync ${{ github.repository }} --branch dev
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

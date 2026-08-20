@@ -1,104 +1,136 @@
-name: Off-Season Job Sync
+name: Job Board Monitor
 
 on:
   schedule:
     # Runs twice per hour
     - cron: '21,51 * * * *'
 
-  # Allows you to test manually from the Actions tab
+  # Lets you test it manually
   workflow_dispatch:
 
-# Required so the workflow can update your fork
 permissions:
   contents: write
 
 jobs:
-  sync:
+  monitor:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Check out YOUR fork's current dev branch
-      - name: Checkout current dev branch
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: dev
-          fetch-depth: 0
 
-      # 2. Remember the current commit before syncing
-      - name: Save current commit
+      - name: Create state directory
+        run: mkdir -p job_state
+
+      - name: Download latest job boards
         run: |
-          echo "OLD_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          curl -L \
+            "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/README.md" \
+            -o /tmp/latest_summer.md
 
-      # 3. Sync your fork's dev branch with the original repository
-      - name: Sync with Upstream
+          curl -L \
+            "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/README-Off-Season.md" \
+            -o /tmp/latest_offseason.md
+
+      - name: Detect new Summer jobs
+        id: summer
         run: |
-          gh repo sync ${{ github.repository }} --branch dev
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 4. Download the newly synced version of dev
-      - name: Fetch synced branch
-        run: |
-          git fetch origin dev
-          git reset --hard origin/dev
-
-      # 5. Remember the new commit
-      - name: Save new commit
-        run: |
-          echo "NEW_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
-
-      # 6. Check whether anything actually changed
-      - name: Check for updates
-        id: changes
-        run: |
-          echo "Before: $OLD_COMMIT"
-          echo "After:  $NEW_COMMIT"
-
-          if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then
-            echo "No upstream changes."
-            echo "changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "Upstream changed."
-            echo "changed=true" >> $GITHUB_OUTPUT
-          fi
-
-      # 7. Extract newly-added rows from README.md
-      - name: Find newly added jobs
-        if: steps.changes.outputs.changed == 'true'
-        id: jobs
-        run: |
-          git diff "$OLD_COMMIT" "$NEW_COMMIT" -- README.md \
-            | grep '^+|' \
-            | grep -v '^+++ ' \
-            | grep -v -- '|---' \
-            | sed 's/^+//' \
-            > /tmp/new_jobs.txt || true
-
-          echo "New rows detected:"
-          cat /tmp/new_jobs.txt || true
-
-          if [ -s /tmp/new_jobs.txt ]; then
-            echo "found=true" >> $GITHUB_OUTPUT
-          else
+          if [ ! -f job_state/README.md ]; then
+            echo "First run - creating baseline."
+            cp /tmp/latest_summer.md job_state/README.md
             echo "found=false" >> $GITHUB_OUTPUT
+          else
+            grep -Fvx -f job_state/README.md /tmp/latest_summer.md \
+              | grep '^|' \
+              > /tmp/new_summer_jobs.txt || true
+
+            if [ -s /tmp/new_summer_jobs.txt ]; then
+              echo "found=true" >> $GITHUB_OUTPUT
+            else
+              echo "found=false" >> $GITHUB_OUTPUT
+            fi
           fi
 
-      # 8. Send new jobs to Discord
-      - name: Send Discord notification
-        if: steps.jobs.outputs.found == 'true'
+      - name: Detect new Off-Season jobs
+        id: offseason
         run: |
-          JOBS=$(cat /tmp/new_jobs.txt | head -c 1700)
+          if [ ! -f job_state/README-Off-Season.md ]; then
+            echo "First run - creating baseline."
+            cp /tmp/latest_offseason.md job_state/README-Off-Season.md
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            grep -Fvx -f job_state/README-Off-Season.md /tmp/latest_offseason.md \
+              | grep '^|' \
+              > /tmp/new_offseason_jobs.txt || true
 
-          MESSAGE=$(printf "🚨 **New jobs added to the GitHub job board**\n\n%s" "$JOBS")
+            if [ -s /tmp/new_offseason_jobs.txt ]; then
+              echo "found=true" >> $GITHUB_OUTPUT
+            else
+              echo "found=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Debug Summer jobs
+        if: steps.summer.outputs.found == 'true'
+        run: |
+          echo "=== NEW SUMMER JOBS ==="
+          head -20 /tmp/new_summer_jobs.txt
+
+      - name: Debug Off-Season jobs
+        if: steps.offseason.outputs.found == 'true'
+        run: |
+          echo "=== NEW OFF-SEASON JOBS ==="
+          head -20 /tmp/new_offseason_jobs.txt
+
+      - name: Notify Discord - Summer
+        if: steps.summer.outputs.found == 'true'
+        run: |
+          JOBS=$(head -c 1600 /tmp/new_summer_jobs.txt)
 
           jq -n \
-            --arg content "$MESSAGE" \
+            --arg content "🌞 **New Summer 2027 internships**"$'\n\n'"$JOBS" \
             '{content: $content}' \
-            > /tmp/discord_payload.json
+            > /tmp/summer_payload.json
 
           curl \
             -H "Content-Type: application/json" \
-            -d @/tmp/discord_payload.json \
+            -d @/tmp/summer_payload.json \
             "$DISCORD_WEBHOOK_URL"
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Notify Discord - Off Season
+        if: steps.offseason.outputs.found == 'true'
+        run: |
+          JOBS=$(head -c 1600 /tmp/new_offseason_jobs.txt)
+
+          jq -n \
+            --arg content "🍂 **New Off-Season internships**"$'\n\n'"$JOBS" \
+            '{content: $content}' \
+            > /tmp/offseason_payload.json
+
+          curl \
+            -H "Content-Type: application/json" \
+            -d @/tmp/offseason_payload.json \
+            "$DISCORD_WEBHOOK_URL"
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Save latest job boards
+        run: |
+          cp /tmp/latest_summer.md job_state/README.md
+          cp /tmp/latest_offseason.md job_state/README-Off-Season.md
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add job_state/
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update job board state"
+            git push
+          fi

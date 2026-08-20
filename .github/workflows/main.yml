@@ -1,16 +1,104 @@
 name: Off-Season Job Sync
+
 on:
   schedule:
-    # Runs at off-peak minutes (21 and 51 past the hour) to avoid server delays
-    - cron: '21,51 * * * *' 
+    # Runs twice per hour
+    - cron: '21,51 * * * *'
+
+  # Allows you to test manually from the Actions tab
   workflow_dispatch:
+
+# Required so the workflow can update your fork
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
+      # 1. Check out YOUR fork's current dev branch
+      - name: Checkout current dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      # 2. Remember the current commit before syncing
+      - name: Save current commit
+        run: |
+          echo "OLD_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      # 3. Sync your fork's dev branch with the original repository
       - name: Sync with Upstream
         run: |
           gh repo sync ${{ github.repository }} --branch dev
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4. Download the newly synced version of dev
+      - name: Fetch synced branch
+        run: |
+          git fetch origin dev
+          git reset --hard origin/dev
+
+      # 5. Remember the new commit
+      - name: Save new commit
+        run: |
+          echo "NEW_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      # 6. Check whether anything actually changed
+      - name: Check for updates
+        id: changes
+        run: |
+          echo "Before: $OLD_COMMIT"
+          echo "After:  $NEW_COMMIT"
+
+          if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then
+            echo "No upstream changes."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Upstream changed."
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      # 7. Extract newly-added rows from README.md
+      - name: Find newly added jobs
+        if: steps.changes.outputs.changed == 'true'
+        id: jobs
+        run: |
+          git diff "$OLD_COMMIT" "$NEW_COMMIT" -- README.md \
+            | grep '^+|' \
+            | grep -v '^+++ ' \
+            | grep -v -- '|---' \
+            | sed 's/^+//' \
+            > /tmp/new_jobs.txt || true
+
+          echo "New rows detected:"
+          cat /tmp/new_jobs.txt || true
+
+          if [ -s /tmp/new_jobs.txt ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 8. Send new jobs to Discord
+      - name: Send Discord notification
+        if: steps.jobs.outputs.found == 'true'
+        run: |
+          JOBS=$(cat /tmp/new_jobs.txt | head -c 1700)
+
+          MESSAGE=$(printf "🚨 **New jobs added to the GitHub job board**\n\n%s" "$JOBS")
+
+          jq -n \
+            --arg content "$MESSAGE" \
+            '{content: $content}' \
+            > /tmp/discord_payload.json
+
+          curl \
+            -H "Content-Type: application/json" \
+            -d @/tmp/discord_payload.json \
+            "$DISCORD_WEBHOOK_URL"
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
